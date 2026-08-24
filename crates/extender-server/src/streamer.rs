@@ -68,8 +68,8 @@ impl ExtenderServer {
                 }
             };
 
-            let packet = match Packet::decode(&buf[..len]) {
-                Ok(p) => p,
+            let (packet, is_legacy) = match Packet::decode(&buf[..len]) {
+                Ok(res) => res,
                 Err(e) => {
                     warn!("Received invalid packet from {} (len: {}): {}", client_addr, len, e);
                     continue;
@@ -79,8 +79,8 @@ impl ExtenderServer {
             match packet.payload {
                 PacketPayload::HandshakeReq(req) => {
                     info!(
-                        "Received HandshakeRequest from client {} (name: {}, preferred: {}x{}@{}Hz)",
-                        client_addr, req.client_name, req.preferred_width, req.preferred_height, req.refresh_rate
+                        "Received HandshakeRequest from client {} (name: {}, preferred: {}x{}@{}Hz, legacy: {})",
+                        client_addr, req.client_name, req.preferred_width, req.preferred_height, req.refresh_rate, is_legacy
                     );
 
                     let (target_w, target_h) = (req.preferred_width, req.preferred_height);
@@ -96,7 +96,7 @@ impl ExtenderServer {
                         .create_virtual_monitor(target_w, target_h)
                         .await
                         .unwrap_or_else(|e| {
-                            warn!("Virtual monitor creation failed or running without active Mutter: {}", e);
+                            warn!("Virtual monitor creation note: {}", e);
                             0
                         });
 
@@ -126,9 +126,15 @@ impl ExtenderServer {
                     };
 
                     let resp_packet = Packet::new(PacketPayload::HandshakeResp(response));
-                    if let Ok(encoded_resp) = resp_packet.encode() {
-                        let _ = input_socket.send_to(&encoded_resp, client_addr).await;
-                        info!("Sent HandshakeResponse to {}", client_addr);
+                    let encoded_resp = if is_legacy {
+                        resp_packet.encode_legacy()
+                    } else {
+                        resp_packet.encode()
+                    };
+
+                    if let Ok(bytes) = encoded_resp {
+                        let _ = input_socket.send_to(&bytes, client_addr).await;
+                        info!("Sent HandshakeResponse ({} bytes) to {}", bytes.len(), client_addr);
                     }
                 }
                 PacketPayload::InputData(event) => {
@@ -137,8 +143,13 @@ impl ExtenderServer {
                 }
                 PacketPayload::Ping { sequence, timestamp_us } => {
                     let pong = Packet::new(PacketPayload::Pong { sequence, timestamp_us });
-                    if let Ok(pong_bytes) = pong.encode() {
-                        let _ = input_socket.send_to(&pong_bytes, client_addr).await;
+                    let pong_bytes = if is_legacy {
+                        pong.encode_legacy()
+                    } else {
+                        pong.encode()
+                    };
+                    if let Ok(bytes) = pong_bytes {
+                        let _ = input_socket.send_to(&bytes, client_addr).await;
                     }
                 }
                 PacketPayload::Disconnect => {

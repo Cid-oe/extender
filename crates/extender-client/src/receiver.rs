@@ -64,7 +64,7 @@ impl ExtenderClient {
             .context("Handshake timeout: host did not respond within 5s")??;
 
         info!("Received response packet ({} bytes) from {}", len, from_addr);
-        let resp_packet = Packet::decode(&buf[..len])?;
+        let (resp_packet, _is_legacy) = Packet::decode(&buf[..len])?;
 
         let resp = match resp_packet.payload {
             PacketPayload::HandshakeResp(r) => r,
@@ -105,7 +105,7 @@ impl ExtenderClient {
         let mut recv_buf = vec![0u8; 2048];
         loop {
             if let Ok((rlen, _)) = socket_arc.recv_from(&mut recv_buf).await {
-                if let Ok(pkt) = Packet::decode(&recv_buf[..rlen]) {
+                if let Ok((pkt, _)) = Packet::decode(&recv_buf[..rlen]) {
                     if let PacketPayload::Pong { .. } = pkt.payload {
                         // Pong received
                     }

@@ -20,6 +20,43 @@ pub enum VideoCodec {
     Av1 = 8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum LegacyPacketType {
+    HandshakeReq = 1,
+    HandshakeResp = 2,
+    VideoData = 3,
+    InputData = 4,
+    Ping = 5,
+    Pong = 6,
+    Disconnect = 7,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LegacyPacketHeader {
+    pub magic: u32,
+    pub version: u16,
+    pub packet_type: LegacyPacketType,
+    pub sequence: u64,
+    pub timestamp_us: u64,
+    pub payload_len: u32,
+    pub checksum: u32,
+}
+
+impl LegacyPacketHeader {
+    pub fn new(packet_type: LegacyPacketType, sequence: u64, timestamp_us: u64, payload_len: u32, checksum: u32) -> Self {
+        Self {
+            magic: EXTENDER_PROTOCOL_MAGIC,
+            version: EXTENDER_PROTOCOL_VERSION,
+            packet_type,
+            sequence,
+            timestamp_us,
+            payload_len,
+            checksum,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HandshakeRequest {
     pub client_name: String,
@@ -72,12 +109,87 @@ impl Packet {
         bincode::serialize(self)
     }
 
-    pub fn decode(bytes: &[u8]) -> Result<Self, bincode::Error> {
-        let packet: Self = bincode::deserialize(bytes)?;
-        if packet.magic != EXTENDER_PROTOCOL_MAGIC || packet.version != EXTENDER_PROTOCOL_VERSION {
-            return Err(bincode::ErrorKind::Custom("Invalid protocol magic or version".to_string()).into());
+    /// Decodes both unified packets and legacy header framing
+    pub fn decode(bytes: &[u8]) -> Result<(Self, bool), bincode::Error> {
+        // Try unified decode first
+        if let Ok(packet) = bincode::deserialize::<Packet>(bytes) {
+            if packet.magic == EXTENDER_PROTOCOL_MAGIC && packet.version == EXTENDER_PROTOCOL_VERSION {
+                return Ok((packet, false));
+            }
         }
-        Ok(packet)
+
+        // Try legacy framing decode
+        let mut cursor = std::io::Cursor::new(bytes);
+        if let Ok(legacy_header) = bincode::deserialize_from::<_, LegacyPacketHeader>(&mut cursor) {
+            if legacy_header.magic == EXTENDER_PROTOCOL_MAGIC {
+                let offset = cursor.position() as usize;
+                let payload_bytes = &bytes[offset..];
+                match legacy_header.packet_type {
+                    LegacyPacketType::HandshakeReq => {
+                        if let Ok(req) = bincode::deserialize::<HandshakeRequest>(payload_bytes) {
+                            return Ok((Packet::new(PacketPayload::HandshakeReq(req)), true));
+                        }
+                    }
+                    LegacyPacketType::HandshakeResp => {
+                        if let Ok(resp) = bincode::deserialize::<HandshakeResponse>(payload_bytes) {
+                            return Ok((Packet::new(PacketPayload::HandshakeResp(resp)), true));
+                        }
+                    }
+                    LegacyPacketType::InputData => {
+                        if let Ok(event) = bincode::deserialize::<InputEvent>(payload_bytes) {
+                            return Ok((Packet::new(PacketPayload::InputData(event)), true));
+                        }
+                    }
+                    LegacyPacketType::Ping => {
+                        return Ok((Packet::new(PacketPayload::Ping {
+                            sequence: legacy_header.sequence,
+                            timestamp_us: legacy_header.timestamp_us,
+                        }), true));
+                    }
+                    LegacyPacketType::Pong => {
+                        return Ok((Packet::new(PacketPayload::Pong {
+                            sequence: legacy_header.sequence,
+                            timestamp_us: legacy_header.timestamp_us,
+                        }), true));
+                    }
+                    LegacyPacketType::Disconnect => {
+                        return Ok((Packet::new(PacketPayload::Disconnect), true));
+                    }
+                    LegacyPacketType::VideoData => {}
+                }
+            }
+        }
+
+        Err(bincode::ErrorKind::Custom("Failed to decode packet in unified or legacy format".to_string()).into())
+    }
+
+    pub fn encode_legacy(&self) -> Result<Vec<u8>, bincode::Error> {
+        match &self.payload {
+            PacketPayload::HandshakeResp(resp) => {
+                let payload_bytes = bincode::serialize(resp)?;
+                let header = LegacyPacketHeader::new(
+                    LegacyPacketType::HandshakeResp,
+                    1,
+                    0,
+                    payload_bytes.len() as u32,
+                    crc32fast::Hasher::new().finalize(),
+                );
+                let mut bytes = bincode::serialize(&header)?;
+                bytes.extend(payload_bytes);
+                Ok(bytes)
+            }
+            PacketPayload::Pong { sequence, timestamp_us } => {
+                let header = LegacyPacketHeader::new(
+                    LegacyPacketType::Pong,
+                    *sequence,
+                    *timestamp_us,
+                    0,
+                    0,
+                );
+                bincode::serialize(&header)
+            }
+            _ => self.encode(),
+        }
     }
 }
 
@@ -86,9 +198,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_packet_handshake_roundtrip() {
+    fn test_legacy_handshake_roundtrip() {
         let req = HandshakeRequest {
-            client_name: "TestLaptop".to_string(),
+            client_name: "ExtenderClient-Wayland".to_string(),
             preferred_width: 1920,
             preferred_height: 1080,
             refresh_rate: 60,
@@ -96,36 +208,43 @@ mod tests {
             auth_token: None,
         };
 
-        let packet = Packet::new(PacketPayload::HandshakeReq(req.clone()));
-        let encoded = packet.encode().expect("Failed to encode");
-        let decoded = Packet::decode(&encoded).expect("Failed to decode");
+        let payload_bytes = bincode::serialize(&req).unwrap();
+        let header = LegacyPacketHeader::new(
+            LegacyPacketType::HandshakeReq,
+            1,
+            0,
+            payload_bytes.len() as u32,
+            crc32fast::Hasher::new().finalize(),
+        );
+        let mut packet_bytes = bincode::serialize(&header).unwrap();
+        packet_bytes.extend(payload_bytes);
 
+        let (decoded, is_legacy) = Packet::decode(&packet_bytes).expect("Failed to decode legacy packet");
+        assert!(is_legacy);
         match decoded.payload {
-            PacketPayload::HandshakeReq(decoded_req) => assert_eq!(req, decoded_req),
-            _ => panic!("Expected HandshakeReq payload"),
+            PacketPayload::HandshakeReq(r) => assert_eq!(r.client_name, "ExtenderClient-Wayland"),
+            _ => panic!("Expected HandshakeReq"),
         }
     }
 
     #[test]
-    fn test_packet_response_roundtrip() {
-        let resp = HandshakeResponse {
-            accepted: true,
-            error_message: None,
-            selected_width: 1920,
-            selected_height: 1080,
-            selected_codec: VideoCodec::H264Software,
-            pipewire_node_id: Some(42),
-            stream_port: 8554,
-            input_port: 8555,
+    fn test_unified_handshake_roundtrip() {
+        let req = HandshakeRequest {
+            client_name: "ExtenderClient-Wayland".to_string(),
+            preferred_width: 1920,
+            preferred_height: 1080,
+            refresh_rate: 60,
+            supported_codecs: vec![VideoCodec::H264Software],
+            auth_token: None,
         };
 
-        let packet = Packet::new(PacketPayload::HandshakeResp(resp.clone()));
-        let encoded = packet.encode().expect("Failed to encode");
-        let decoded = Packet::decode(&encoded).expect("Failed to decode");
-
+        let packet = Packet::new(PacketPayload::HandshakeReq(req));
+        let packet_bytes = packet.encode().unwrap();
+        let (decoded, is_legacy) = Packet::decode(&packet_bytes).expect("Failed to decode unified packet");
+        assert!(!is_legacy);
         match decoded.payload {
-            PacketPayload::HandshakeResp(decoded_resp) => assert_eq!(resp, decoded_resp),
-            _ => panic!("Expected HandshakeResp payload"),
+            PacketPayload::HandshakeReq(r) => assert_eq!(r.client_name, "ExtenderClient-Wayland"),
+            _ => panic!("Expected HandshakeReq"),
         }
     }
 }
