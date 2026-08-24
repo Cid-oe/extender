@@ -79,8 +79,8 @@ impl VideoEncoderPipeline {
 
         let child = Command::new("gst-launch-1.0")
             .args(pipeline_str.split_whitespace())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .context("Failed to spawn gst-launch-1.0 pipeline")?;
 
