@@ -20,32 +20,52 @@ impl VideoDisplayPipeline {
 
     /// Spawns a low-latency GStreamer pipeline receiving RTP, decoding with HW or SW, and rendering on Wayland
     pub fn start_display(&mut self) -> Result<()> {
-        let (depay_element, dec_element) = match self.codec {
-            VideoCodec::H264Vaapi => ("rtph264depay ! h264parse", "vaapih264dec"),
-            VideoCodec::H264Nvenc => ("rtph264depay ! h264parse", "nvh264dec"),
-            VideoCodec::H264Software => ("rtph264depay ! h264parse", "avdec_h264"),
-            VideoCodec::H265Vaapi => ("rtph265depay ! h265parse", "vaapih265dec"),
-            VideoCodec::H265Nvenc => ("rtph265depay ! h265parse", "nvh265dec"),
-            VideoCodec::Vp8 => ("rtpvp8depay", "vp8dec"),
-            VideoCodec::Vp9 => ("rtpvp9depay", "vp9dec"),
-            VideoCodec::Av1 => ("rtpav1depay", "dav1ddec"),
+        let (caps_str, depay_and_decode) = match self.codec {
+            VideoCodec::H264Vaapi => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96",
+                "rtph264depay ! h264parse ! vaapih264dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::H264Nvenc => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96",
+                "rtph264depay ! h264parse ! nvh264dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::H264Software => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96",
+                "rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::H265Vaapi => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload=96",
+                "rtph265depay ! h265parse ! vaapih265dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::H265Nvenc => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=H265,payload=96",
+                "rtph265depay ! h265parse ! nvh265dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::Vp8 => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=VP8,payload=96",
+                "rtpvp8depay ! vp8dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::Vp9 => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=VP9,payload=96",
+                "rtpvp9depay ! vp9dec ! videoconvert ! autovideosink sync=false",
+            ),
+            VideoCodec::Av1 => (
+                "application/x-rtp,media=video,clock-rate=90000,encoding-name=AV1,payload=96",
+                "rtpav1depay ! dav1ddec ! videoconvert ! autovideosink sync=false",
+            ),
         };
 
         let pipeline_str = format!(
-            "udpsrc port={} caps=application/x-rtp ! \
-             {} ! \
-             {} ! \
-             videoconvert ! \
-             autovideosink sync=false",
-            self.stream_port, depay_element, dec_element
+            "udpsrc port={} caps={} ! {}",
+            self.stream_port, caps_str, depay_and_decode
         );
 
         info!("Launching Video Decoder & Display pipeline: gst-launch-1.0 {}", pipeline_str);
 
         let child = Command::new("gst-launch-1.0")
             .args(pipeline_str.split_whitespace())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
             .spawn()
             .context("Failed to spawn client gst-launch-1.0 pipeline")?;
 

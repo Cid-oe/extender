@@ -26,35 +26,35 @@ impl VideoEncoderPipeline {
     pub fn start_stream(&mut self, pipewire_node_id: u32, target_ip: &str, target_port: u16) -> Result<()> {
         let (enc_element, payload_element) = match self.codec {
             VideoCodec::H264Vaapi => (
-                format!("vaapih264enc bitrate={} rate-control=cbr tune=low-latency", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=NV12 ! vaapih264enc bitrate={} rate-control=cbr tune=low-latency", self.bitrate_kbps),
                 "rtph264pay config-interval=1 pt=96",
             ),
             VideoCodec::H264Nvenc => (
-                format!("nvh264enc bitrate={} preset=low-latency-hq rc-mode=cbr", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=NV12 ! nvh264enc bitrate={} preset=low-latency-hq rc-mode=cbr", self.bitrate_kbps),
                 "rtph264pay config-interval=1 pt=96",
             ),
             VideoCodec::H264Software => (
-                format!("x264enc bitrate={} speed-preset=ultrafast tune=zerolatency bframes=0 key-int-max=30", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=I420 ! x264enc bitrate={} speed-preset=ultrafast tune=zerolatency bframes=0 key-int-max=30", self.bitrate_kbps),
                 "rtph264pay config-interval=1 pt=96",
             ),
             VideoCodec::H265Vaapi => (
-                format!("vaapih265enc bitrate={} rate-control=cbr tune=low-latency", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=NV12 ! vaapih265enc bitrate={} rate-control=cbr tune=low-latency", self.bitrate_kbps),
                 "rtph265pay config-interval=1 pt=96",
             ),
             VideoCodec::H265Nvenc => (
-                format!("nvh265enc bitrate={} preset=low-latency-hq rc-mode=cbr", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=NV12 ! nvh265enc bitrate={} preset=low-latency-hq rc-mode=cbr", self.bitrate_kbps),
                 "rtph265pay config-interval=1 pt=96",
             ),
             VideoCodec::Vp8 => (
-                format!("vp8enc target-bitrate={} deadline=1 cpu-used=8", self.bitrate_kbps * 1000),
+                format!("videoconvert ! video/x-raw,format=I420 ! vp8enc target-bitrate={} deadline=1 cpu-used=8", self.bitrate_kbps * 1000),
                 "rtpvp8pay pt=96",
             ),
             VideoCodec::Vp9 => (
-                format!("vp9enc target-bitrate={} deadline=1 cpu-used=8", self.bitrate_kbps * 1000),
+                format!("videoconvert ! video/x-raw,format=I420 ! vp9enc target-bitrate={} deadline=1 cpu-used=8", self.bitrate_kbps * 1000),
                 "rtpvp9pay pt=96",
             ),
             VideoCodec::Av1 => (
-                format!("rav1eenc speed=10 low-latency=true bitrate={}", self.bitrate_kbps),
+                format!("videoconvert ! video/x-raw,format=I420 ! rav1eenc speed=10 low-latency=true bitrate={}", self.bitrate_kbps),
                 "rtpav1pay pt=96",
             ),
         };
@@ -67,8 +67,6 @@ impl VideoEncoderPipeline {
 
         let pipeline_str = format!(
             "pipewiresrc {} do-timestamp=true keepalive-time=1000 ! \
-             video/x-raw,framerate=60/1 ! \
-             videoconvert ! \
              {} ! \
              {} ! \
              udpsink host={} port={} sync=false async=false",
