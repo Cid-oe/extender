@@ -1,0 +1,19 @@
+[package]
+name = "extender-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+extender-common = { path = "../extender-common" }
+tokio.workspace = true
+zbus.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+crc32fast.workspace = true
+socket2.workspace = true
+byteorder.workspace = true
