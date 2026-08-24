@@ -1,12 +1,11 @@
 use anyhow::{Context, Result};
-use extender_common::events::InputEvent;
 use extender_common::protocol::{
-    HandshakeRequest, HandshakeResponse, PacketHeader, PacketType, VideoCodec,
+    HandshakeResponse, Packet, PacketPayload, VideoCodec,
 };
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use crate::capture::VideoEncoderPipeline;
 use crate::input_sink::InputInjector;
@@ -69,97 +68,88 @@ impl ExtenderServer {
                 }
             };
 
-            if len < std::mem::size_of::<PacketHeader>() {
-                continue;
-            }
-
-            if let Ok(header) = bincode::deserialize::<PacketHeader>(&buf[..32.min(len)]) {
-                if !header.validate() {
+            let packet = match Packet::decode(&buf[..len]) {
+                Ok(p) => p,
+                Err(e) => {
+                    warn!("Received invalid packet from {} (len: {}): {}", client_addr, len, e);
                     continue;
                 }
+            };
 
-                match header.packet_type {
-                    PacketType::HandshakeReq => {
-                        info!("Received HandshakeRequest from client {}", client_addr);
-                        let payload = &buf[32.min(len)..len];
-                        if let Ok(req) = bincode::deserialize::<HandshakeRequest>(payload) {
-                            let (target_w, target_h) = (req.preferred_width, req.preferred_height);
-                            let selected_codec = if req.supported_codecs.contains(&self.codec) {
-                                self.codec
-                            } else {
-                                req.supported_codecs.first().copied().unwrap_or(VideoCodec::H264Software)
-                            };
+            match packet.payload {
+                PacketPayload::HandshakeReq(req) => {
+                    info!(
+                        "Received HandshakeRequest from client {} (name: {}, preferred: {}x{}@{}Hz)",
+                        client_addr, req.client_name, req.preferred_width, req.preferred_height, req.refresh_rate
+                    );
 
-                            let mut mutter_guard = self.mutter.lock().await;
-                            let pw_node_id = mutter_guard.create_virtual_monitor(target_w, target_h).await.unwrap_or(0);
+                    let (target_w, target_h) = (req.preferred_width, req.preferred_height);
+                    let selected_codec = if req.supported_codecs.contains(&self.codec) {
+                        self.codec
+                    } else {
+                        req.supported_codecs.first().copied().unwrap_or(VideoCodec::H264Software)
+                    };
 
-                            let mut pipeline = VideoEncoderPipeline::new(
-                                selected_codec,
-                                target_w,
-                                target_h,
-                                self.bitrate_kbps,
-                            );
+                    info!("Allocating Mutter virtual monitor: {}x{}", target_w, target_h);
+                    let mut mutter_guard = self.mutter.lock().await;
+                    let pw_node_id = mutter_guard
+                        .create_virtual_monitor(target_w, target_h)
+                        .await
+                        .unwrap_or_else(|e| {
+                            warn!("Virtual monitor creation failed or running without active Mutter: {}", e);
+                            0
+                        });
 
-                            let client_ip = client_addr.ip().to_string();
-                            if let Err(e) = pipeline.start_stream(pw_node_id, &client_ip, self.stream_port) {
-                                error!("Failed to start encoder pipeline: {}", e);
-                            }
-                            encoder_pipeline = Some(pipeline);
+                    let mut pipeline = VideoEncoderPipeline::new(
+                        selected_codec,
+                        target_w,
+                        target_h,
+                        self.bitrate_kbps,
+                    );
 
-                            let response = HandshakeResponse {
-                                accepted: true,
-                                error_message: None,
-                                selected_width: target_w,
-                                selected_height: target_h,
-                                selected_codec,
-                                pipewire_node_id: Some(pw_node_id),
-                                stream_port: self.stream_port,
-                                input_port: self.input_port,
-                            };
-
-                            let encoded_resp = bincode::serialize(&response)?;
-                            let resp_header = PacketHeader::new(
-                                PacketType::HandshakeResp,
-                                1,
-                                0,
-                                encoded_resp.len() as u32,
-                                crc32fast::Hasher::new().finalize(),
-                            );
-                            let mut resp_packet = bincode::serialize(&resp_header)?;
-                            resp_packet.extend(encoded_resp);
-
-                            let _ = input_socket.send_to(&resp_packet, client_addr).await;
-                        }
+                    let client_ip = client_addr.ip().to_string();
+                    info!("Starting video encoding pipeline towards client {}:{}", client_ip, self.stream_port);
+                    if let Err(e) = pipeline.start_stream(pw_node_id, &client_ip, self.stream_port) {
+                        error!("Failed to start encoder pipeline: {}", e);
                     }
-                    PacketType::InputData => {
-                        let payload = &buf[32.min(len)..len];
-                        if let Ok(event) = bincode::deserialize::<InputEvent>(payload) {
-                            let mut injector = self.input_injector.lock().await;
-                            let _ = injector.inject_event(event);
-                        }
+                    encoder_pipeline = Some(pipeline);
+
+                    let response = HandshakeResponse {
+                        accepted: true,
+                        error_message: None,
+                        selected_width: target_w,
+                        selected_height: target_h,
+                        selected_codec,
+                        pipewire_node_id: Some(pw_node_id),
+                        stream_port: self.stream_port,
+                        input_port: self.input_port,
+                    };
+
+                    let resp_packet = Packet::new(PacketPayload::HandshakeResp(response));
+                    if let Ok(encoded_resp) = resp_packet.encode() {
+                        let _ = input_socket.send_to(&encoded_resp, client_addr).await;
+                        info!("Sent HandshakeResponse to {}", client_addr);
                     }
-                    PacketType::Ping => {
-                        let pong_header = PacketHeader::new(
-                            PacketType::Pong,
-                            header.sequence,
-                            header.timestamp_us,
-                            0,
-                            0,
-                        );
-                        if let Ok(pong_bytes) = bincode::serialize(&pong_header) {
-                            let _ = input_socket.send_to(&pong_bytes, client_addr).await;
-                        }
-                    }
-                    PacketType::Disconnect => {
-                        info!("Client {} requested disconnect", client_addr);
-                        if let Some(mut pipeline) = encoder_pipeline.take() {
-                            let _ = pipeline.stop();
-                        }
-                        let mut mutter_guard = self.mutter.lock().await;
-                        let _ = mutter_guard.stop().await;
-                    }
-                    _ => {}
                 }
+                PacketPayload::InputData(event) => {
+                    let mut injector = self.input_injector.lock().await;
+                    let _ = injector.inject_event(event);
+                }
+                PacketPayload::Ping { sequence, timestamp_us } => {
+                    let pong = Packet::new(PacketPayload::Pong { sequence, timestamp_us });
+                    if let Ok(pong_bytes) = pong.encode() {
+                        let _ = input_socket.send_to(&pong_bytes, client_addr).await;
+                    }
+                }
+                PacketPayload::Disconnect => {
+                    info!("Client {} requested disconnect", client_addr);
+                    if let Some(mut pipeline) = encoder_pipeline.take() {
+                        let _ = pipeline.stop();
+                    }
+                    let mut mutter_guard = self.mutter.lock().await;
+                    let _ = mutter_guard.stop().await;
+                }
+                _ => {}
             }
         }
     }

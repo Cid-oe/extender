@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use extender_common::protocol::{
-    HandshakeRequest, HandshakeResponse, PacketHeader, PacketType, VideoCodec,
+    HandshakeRequest, Packet, PacketPayload, VideoCodec,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -52,32 +52,25 @@ impl ExtenderClient {
             auth_token: None,
         };
 
-        let encoded_req = bincode::serialize(&req)?;
-        let header = PacketHeader::new(
-            PacketType::HandshakeReq,
-            1,
-            0,
-            encoded_req.len() as u32,
-            crc32fast::Hasher::new().finalize(),
-        );
+        let req_packet = Packet::new(PacketPayload::HandshakeReq(req));
+        let packet_bytes = req_packet.encode()?;
 
-        let mut packet = bincode::serialize(&header)?;
-        packet.extend(encoded_req);
-
-        socket.send_to(&packet, self.server_addr).await?;
-        info!("Sent HandshakeRequest. Waiting for server response...");
+        socket.send_to(&packet_bytes, self.server_addr).await?;
+        info!("Sent HandshakeRequest to {}. Waiting for server response...", self.server_addr);
 
         let mut buf = vec![0u8; 65535];
-        let (len, _) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
+        let (len, from_addr) = tokio::time::timeout(Duration::from_secs(5), socket.recv_from(&mut buf))
             .await
-            .context("Handshake timeout: host did not respond")??;
+            .context("Handshake timeout: host did not respond within 5s")??;
 
-        let resp_header: PacketHeader = bincode::deserialize(&buf[..32.min(len)])?;
-        if resp_header.packet_type != PacketType::HandshakeResp {
-            anyhow::bail!("Unexpected packet type in handshake response");
-        }
+        info!("Received response packet ({} bytes) from {}", len, from_addr);
+        let resp_packet = Packet::decode(&buf[..len])?;
 
-        let resp: HandshakeResponse = bincode::deserialize(&buf[32.min(len)..len])?;
+        let resp = match resp_packet.payload {
+            PacketPayload::HandshakeResp(r) => r,
+            other => anyhow::bail!("Unexpected packet type in handshake response: {:?}", other),
+        };
+
         if !resp.accepted {
             anyhow::bail!("Host rejected connection: {:?}", resp.error_message);
         }
@@ -101,8 +94,8 @@ impl ExtenderClient {
             loop {
                 tokio::time::sleep(Duration::from_secs(1)).await;
                 seq += 1;
-                let ping_header = PacketHeader::new(PacketType::Ping, seq, 0, 0, 0);
-                if let Ok(ping_bytes) = bincode::serialize(&ping_header) {
+                let ping = Packet::new(PacketPayload::Ping { sequence: seq, timestamp_us: 0 });
+                if let Ok(ping_bytes) = ping.encode() {
                     let _ = ping_socket.send_to(&ping_bytes, server_addr).await;
                 }
             }
@@ -112,8 +105,8 @@ impl ExtenderClient {
         let mut recv_buf = vec![0u8; 2048];
         loop {
             if let Ok((rlen, _)) = socket_arc.recv_from(&mut recv_buf).await {
-                if let Ok(hdr) = bincode::deserialize::<PacketHeader>(&recv_buf[..32.min(rlen)]) {
-                    if hdr.packet_type == PacketType::Pong {
+                if let Ok(pkt) = Packet::decode(&recv_buf[..rlen]) {
+                    if let PacketPayload::Pong { .. } = pkt.payload {
                         // Pong received
                     }
                 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use extender_common::events::InputEvent;
-use extender_common::protocol::{PacketHeader, PacketType};
+use extender_common::protocol::{Packet, PacketPayload};
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tracing::debug;
@@ -8,7 +8,6 @@ use tracing::debug;
 pub struct InputSender {
     socket: UdpSocket,
     server_addr: SocketAddr,
-    sequence: u64,
 }
 
 impl InputSender {
@@ -17,26 +16,14 @@ impl InputSender {
         Ok(Self {
             socket,
             server_addr,
-            sequence: 0,
         })
     }
 
     pub async fn send_event(&mut self, event: InputEvent) -> Result<()> {
-        self.sequence += 1;
-        let payload = bincode::serialize(&event)?;
-        let header = PacketHeader::new(
-            PacketType::InputData,
-            self.sequence,
-            0,
-            payload.len() as u32,
-            crc32fast::Hasher::new().finalize(),
-        );
-
-        let mut packet = bincode::serialize(&header)?;
-        packet.extend(payload);
-
-        self.socket.send_to(&packet, self.server_addr).await?;
-        debug!("Sent input event seq {}", self.sequence);
+        let packet = Packet::new(PacketPayload::InputData(event));
+        let packet_bytes = packet.encode()?;
+        self.socket.send_to(&packet_bytes, self.server_addr).await?;
+        debug!("Sent input event packet");
         Ok(())
     }
 }
