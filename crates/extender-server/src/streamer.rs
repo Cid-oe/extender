@@ -9,10 +9,10 @@ use tracing::{error, info, warn};
 
 use crate::capture::VideoEncoderPipeline;
 use crate::input_sink::InputInjector;
-use crate::mutter::MutterVirtualMonitorManager;
+use crate::monitor::{CompositorBackend, VirtualMonitorManager};
 
 pub struct ExtenderServer {
-    mutter: Arc<Mutex<MutterVirtualMonitorManager>>,
+    monitor_mgr: Arc<Mutex<VirtualMonitorManager>>,
     input_injector: Arc<Mutex<InputInjector>>,
     stream_port: u16,
     input_port: u16,
@@ -30,15 +30,16 @@ impl ExtenderServer {
         input_port: u16,
         codec: VideoCodec,
         bitrate_kbps: u32,
+        compositor: CompositorBackend,
     ) -> Result<Self> {
-        let mutter = MutterVirtualMonitorManager::new()
+        let monitor_mgr = VirtualMonitorManager::new(compositor)
             .await
-            .context("Failed to initialize Mutter D-Bus manager")?;
+            .context("Failed to initialize virtual monitor manager")?;
         let input_injector = InputInjector::new(width, height)
             .context("Failed to initialize Input Injector")?;
 
         Ok(Self {
-            mutter: Arc::new(Mutex::new(mutter)),
+            monitor_mgr: Arc::new(Mutex::new(monitor_mgr)),
             input_injector: Arc::new(Mutex::new(input_injector)),
             stream_port,
             input_port,
@@ -90,10 +91,10 @@ impl ExtenderServer {
                         req.supported_codecs.first().copied().unwrap_or(VideoCodec::H264Software)
                     };
 
-                    info!("Allocating Mutter virtual monitor: {}x{}", target_w, target_h);
-                    let mut mutter_guard = self.mutter.lock().await;
-                    let pw_node_id = mutter_guard
-                        .create_virtual_monitor(target_w, target_h)
+                    info!("Allocating virtual monitor: {}x{}@{}Hz", target_w, target_h, req.refresh_rate);
+                    let mut monitor_guard = self.monitor_mgr.lock().await;
+                    let pw_node_id = monitor_guard
+                        .create_virtual_monitor(target_w, target_h, req.refresh_rate)
                         .await
                         .unwrap_or_else(|e| {
                             warn!("Virtual monitor creation note: {}", e);
@@ -157,8 +158,8 @@ impl ExtenderServer {
                     if let Some(mut pipeline) = encoder_pipeline.take() {
                         let _ = pipeline.stop();
                     }
-                    let mut mutter_guard = self.mutter.lock().await;
-                    let _ = mutter_guard.stop().await;
+                    let mut monitor_guard = self.monitor_mgr.lock().await;
+                    let _ = monitor_guard.stop().await;
                 }
                 _ => {}
             }

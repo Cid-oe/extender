@@ -18,3 +18,5 @@ crc32fast.workspace = true
 socket2.workspace = true
 byteorder.workspace = true
 futures-util.workspace = true
+clap.workspace = true
+

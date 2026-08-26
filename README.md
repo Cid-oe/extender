@@ -1,17 +1,19 @@
 # Extender: Wayland-Native Remote Extended Monitor
 
-Extender is a native Linux tool designed for Ubuntu GNOME (Wayland) environments that turns a secondary machine (such as a laptop) into a remote extended monitor for a primary workstation.
+Extender is a high-performance, native Linux tool designed for **Omarchy (Hyprland)** and **GNOME (Wayland)** environments. It transforms a secondary machine (such as a laptop) into a zero-friction, ultra-low-latency remote extended monitor for your primary workstation.
 
 ---
 
 ## Architecture Overview
 
-Extender connects two Wayland systems over a low-latency network pipe:
+Extender connects two Wayland systems over a high-throughput, low-latency network pipe:
 
 ```
 +-------------------------------------------------------------------------+
 | WORKSTATION (Host)                                                      |
-|   1. Mutter D-Bus -> Creates Headless Virtual Monitor (RecordVirtual)  |
+|   1. Virtual Output:                                                    |
+|      - Omarchy / Hyprland: `hyprctl output create headless`            |
+|      - GNOME / Mutter: `ScreenCast.RecordVirtual` D-Bus Session         |
 |   2. PipeWire -> Captures Raw Video Frames from Virtual Node           |
 |   3. GStreamer -> Low-latency HW/SW Encoding (VAAPI / NVENC / x264)     |
 |   4. Extender Host Daemon -> RTP Streaming & UInput Event Injection    |
@@ -32,16 +34,34 @@ Extender connects two Wayland systems over a low-latency network pipe:
 
 ## Workspace Structure
 
-- `crates/extender-common`: Shared binary protocol headers, packet serializers, handshake contracts, and HID input event definitions.
-- `crates/extender-server`: Host service managing GNOME Mutter `ScreenCast.RecordVirtual` D-Bus sessions, PipeWire video capture, and `/dev/uinput` event simulation.
-- `crates/extender-client`: Client application handling handshake negotiation, GStreamer Wayland decoder pipelines, and input forwarding.
-- `crates/extender-cli`: Unified binary CLI (`extender host` / `extender client`).
+- [`crates/extender-common`](crates/extender-common): Shared binary protocol headers, packet serializers, handshake contracts, and HID input event definitions.
+- [`crates/extender-server`](crates/extender-server): Host service managing multi-compositor virtual monitors (**Omarchy/Hyprland** & **GNOME/Mutter**), PipeWire video capture, and `/dev/uinput` event simulation.
+- [`crates/extender-client`](crates/extender-client): Client application handling handshake negotiation, GStreamer Wayland decoder pipelines, and input forwarding.
+- [`crates/extender-cli`](crates/extender-cli): Unified binary CLI (`extender host` / `extender client`).
 
 ---
 
 ## Requirements & Prerequisites
 
-### System Packages
+### 1. Omarchy / Arch Linux
+
+On Omarchy or Arch Linux workstations:
+```bash
+sudo pacman -S --needed \
+    pipewire \
+    gstreamer \
+    gst-plugins-base \
+    gst-plugins-good \
+    gst-plugins-bad \
+    gst-plugins-ugly \
+    gst-plugin-va \
+    gst-libav \
+    hyprland
+```
+
+### 2. Ubuntu / Debian (GNOME)
+
+On Ubuntu or Debian workstations:
 ```bash
 sudo apt update
 sudo apt install -y \
@@ -62,14 +82,17 @@ sudo apt install -y \
 
 ### 1. Build Extender
 ```bash
-cd extender
 cargo build --release
 ```
 
-### 2. Start Extender Host (Workstation)
+### 2. Start Extender Host on Omarchy (Workstation)
+When launched on Omarchy, Extender automatically detects Hyprland and creates a headless virtual monitor (`EXTENDER-1`):
 ```bash
-# Software encoding fallback
+# Auto-detects Omarchy/Hyprland with software H.264
 ./target/release/extender host --width 1920 --height 1080 --codec h264-software
+
+# Explicitly specifying Omarchy / Hyprland compositor
+./target/release/extender host --compositor hyprland --width 1920 --height 1080 --codec h264-software
 
 # Intel/AMD Hardware acceleration (VAAPI)
 ./target/release/extender host --width 1920 --height 1080 --codec h264-vaapi
@@ -95,4 +118,4 @@ cargo build --release
 
 ## License
 MIT OR Apache-2.0
-# extender
+

@@ -2,13 +2,13 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use extender_client::ExtenderClient;
 use extender_common::protocol::{DEFAULT_INPUT_PORT, DEFAULT_STREAM_PORT, VideoCodec};
-use extender_server::ExtenderServer;
+use extender_server::{CompositorBackend, ExtenderServer};
 use std::net::SocketAddr;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
-#[command(name = "extender", version = "0.1.0", about = "Wayland-native remote extended monitor for Ubuntu GNOME")]
+#[command(name = "extender", version = "0.1.0", about = "Wayland-native remote extended monitor for Omarchy (Hyprland) & GNOME")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -57,6 +57,9 @@ enum Commands {
         codec: CodecArg,
         #[arg(short, long, default_value_t = 8000)]
         bitrate_kbps: u32,
+        /// Wayland compositor backend for virtual display management
+        #[arg(long, value_enum, default_value_t = CompositorBackend::Auto)]
+        compositor: CompositorBackend,
     },
     /// Connect to an Extender Host from the client laptop
     Client {
@@ -89,8 +92,9 @@ async fn main() -> Result<()> {
             input_port,
             codec,
             bitrate_kbps,
+            compositor,
         } => {
-            info!("Starting Extender Host ({width}x{height}) on port {input_port}...");
+            info!("Starting Extender Host ({width}x{height}) on port {input_port} (compositor: {compositor:?})...");
             let mut server = ExtenderServer::new(
                 width,
                 height,
@@ -98,6 +102,7 @@ async fn main() -> Result<()> {
                 input_port,
                 codec.into(),
                 bitrate_kbps,
+                compositor,
             )
             .await?;
             server.run().await?;
